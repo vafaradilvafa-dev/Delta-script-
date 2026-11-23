@@ -1,0 +1,628 @@
+--[[ ================================================================
+     DELTA ANTI-LAG PRO v1.0  |  UNIVERSAL  |  AUTO + MENU GUI
+     ================================================================
+     OPTIMASI OTOMATIS (langsung jalan saat script dieksekusi):
+       - Hapus tekstur, decal, surface appearance (mode agresif)
+       - Hapus partikel, trail, beam, fire, smoke, sparkles
+       - Matikan efek lighting (bloom, sunrays, blur, dll) + bayangan
+       - Hapus rumput (terrain decoration) + optimasi air
+       - Hapus langit (Sky) + atmosfer
+       - Low graphics level 1
+       - FPS cap: No Cap (9999)  -> bisa diubah lewat menu
+       - Anti-AFK + Auto Rejoin + FPS Counter & Ping
+
+     MENU GUI (bahasa Indonesia, bisa digeser):
+       - Toggle ON/OFF semua fitur (bisa dikembalikan ke normal)
+       - Tombol batas FPS: 60 / 120 / 240 / No Cap
+       - Fullbright, No Fog, Matikan Suara
+       - Server Hop (cari server paling sepi), Rejoin Server
+       - Bersihkan Memori, Matikan Script (Unload)
+
+     CARA PAKAI: paste seluruh script ini ke editor Delta Executor,
+     lalu tekan Execute saat sudah berada DI DALAM game Roblox.
+     ================================================================ ]]
+
+-- biar tidak dobel kalau script dijalankan dua kali
+if _G.DeltaAntiLagPro and _G.DeltaAntiLagPro.Unload then
+    pcall(_G.DeltaAntiLagPro.Unload)
+end
+
+-- =================================================================
+-- SERVICES & DASAR
+-- =================================================================
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local Lighting         = game:GetService("Lighting")
+local TeleportService  = game:GetService("TeleportService")
+local HttpService      = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local VirtualUser      = game:GetService("VirtualUser")
+local SoundService     = game:GetService("SoundService")
+
+local LocalPlayer = Players.LocalPlayer
+local Terrain     = workspace:FindFirstChildOfClass("Terrain")
+
+local Running = true
+local Conns   = {}
+
+local Config = {
+    Textures   = true,   -- hapus tekstur dan decal (agresif)
+    Particles  = true,   -- hapus partikel dan efek
+    Shadows    = true,   -- matikan bayangan
+    Grass      = true,   -- hapus rumput
+    Water      = true,   -- optimasi air
+    Sky        = true,   -- hapus langit dan atmosfer
+    LowGfx     = true,   -- graphics level 1
+    Sounds     = false,  -- matikan suara
+    NoFog      = false,  -- tanpa kabut
+    Fullbright = false,  -- terang penuh
+    AntiAFK    = true,   -- anti kick saat idle
+    AutoRejoin = true,   -- otomatis masuk lagi saat dc
+    FPSCounter = true,   -- tampilan FPS dan ping
+}
+
+-- cache untuk mengembalikan tampilan normal saat toggle dimatikan
+local texCache          = {}
+local particleCache     = {}
+local soundCache        = {}
+local postFxCache       = {}
+local skyCache          = {}
+local terrainCache      = nil
+local lightingPropCache = nil
+local fogCache          = nil
+
+local descConn  = nil
+local lightConn = nil
+local afkConn   = nil
+
+local CurrentFpsCap = 9999
+
+local gui         = nil
+local NotifyLabel = nil
+local notifyFrame = nil
+local notifyToken = 0
+
+local function notify(text)
+    print("[Delta Anti-Lag] " .. tostring(text))
+    if not notifyFrame or not NotifyLabel then return end
+    notifyToken = notifyToken + 1
+    local token = notifyToken
+    NotifyLabel.Text = tostring(text)
+    notifyFrame.Visible = true
+    notifyFrame.BackgroundTransparency = 0.15
+    NotifyLabel.TextTransparency = 0
+    task.delay(2.5, function()
+        if token == notifyToken then
+            pcall(function()
+                TweenService:Create(notifyFrame, TweenInfo.new(0.4), { BackgroundTransparency = 1 }):Play()
+                TweenService:Create(NotifyLabel, TweenInfo.new(0.4), { TextTransparency = 1 }):Play()
+            end)
+            task.wait(0.45)
+            if token == notifyToken then
+                notifyFrame.Visible = false
+            end
+        end
+    end)
+end
+
+-- =================================================================
+-- HELPER GUI
+-- =================================================================
+local COLORS = {
+    BG        = Color3.fromRGB(18, 20, 30),
+    BG2       = Color3.fromRGB(28, 32, 48),
+    Accent    = Color3.fromRGB(0, 230, 118),
+    AccentDim = Color3.fromRGB(0, 110, 60),
+    Text      = Color3.fromRGB(235, 240, 245),
+    SubText   = Color3.fromRGB(150, 158, 175),
+    Off       = Color3.fromRGB(72, 78, 95),
+}
+
+local function new(class, props)
+    local inst = Instance.new(class)
+    for k, v in pairs(props) do
+        inst[k] = v
+    end
+    return inst
+end
+
+-- geser (drag) untuk menu dan tombol melayang, mendukung HP
+local function makeDraggable(handle, target)
+    local dragging  = false
+    local dragInput = nil
+    local dragStart = nil
+    local startPos  = nil
+    local moved     = false
+
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            moved     = false
+            dragStart = input.Position
+            startPos  = target.Position
+        end
+    end)
+
+    handle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+
+    table.insert(Conns, UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            if math.abs(delta.X) + math.abs(delta.Y) > 6 then moved = true end
+            target.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end))
+
+    table.insert(Conns, UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end))
+
+    return function() return moved end
+end
+
+-- =================================================================
+-- APLIKASI PER-INSTANCE (dengan cache biar bisa dikembalikan)
+-- =================================================================
+local function applyToPart(v)
+    if texCache[v] then return end
+    pcall(function()
+        texCache[v] = { Material = v.Material, Reflectance = v.Reflectance }
+        v.Material = Enum.Material.SmoothPlastic
+        v.Reflectance = 0
+    end)
+    pcall(function()
+        if v:IsA("MeshPart") then
+            texCache[v].TextureID = v.TextureID
+            v.TextureID = ""
+        end
+    end)
+end
+
+local function applyToDecal(v)
+    if texCache[v] then return end
+    pcall(function()
+        texCache[v] = { Transparency = v.Transparency }
+        v.Transparency = 1
+    end)
+end
+
+local function applyToSurface(v)
+    if texCache[v] then return end
+    pcall(function()
+        texCache[v] = { Parent = v.Parent }
+        v.Parent = nil
+    end)
+end
+
+local function applyToEmitter(v)
+    if particleCache[v] ~= nil then return end
+    pcall(function()
+        particleCache[v] = v.Enabled
+        v.Enabled = false
+    end)
+end
+
+local function applyToSound(v)
+    if soundCache[v] ~= nil then return end
+    pcall(function()
+        soundCache[v] = v.Volume
+        v.Volume = 0
+    end)
+end
+
+local function cachePostFx(v)
+    if postFxCache[v] ~= nil then return end
+    pcall(function()
+        postFxCache[v] = { Enabled = v.Enabled }
+        v.Enabled = false
+    end)
+end
+
+local function cacheSky(v)
+    if skyCache[v] ~= nil then return end
+    pcall(function()
+        skyCache[v] = { Parent = v.Parent }
+        v.Parent = nil
+    end)
+end
+
+local function cacheAtmosphere(v)
+    if skyCache[v] ~= nil then return end
+    pcall(function()
+        skyCache[v] = { Density = v.Density }
+        v.Density = 0
+    end)
+end
+
+local function restoreCache(cache)
+    for v, data in pairs(cache) do
+        pcall(function()
+            if data.Enabled ~= nil then v.Enabled = data.Enabled end
+            if data.Density ~= nil then v.Density = data.Density end
+            if data.Parent ~= nil then v.Parent = data.Parent end
+        end)
+    end
+end
+
+local function isEmitter(v)
+    return v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Beam")
+        or v:IsA("Fire") or v:IsA("Smoke") or v:IsA("Sparkles")
+end
+
+-- dipanggil untuk setiap instance baru yang muncul di workspace
+local function onInstanceAdded(v)
+    if not Running or not v then return end
+    pcall(function()
+        if Config.Textures then
+            if v:IsA("BasePart") and not v:IsA("Terrain") then
+                applyToPart(v)
+            elseif v:IsA("Decal") then
+                applyToDecal(v)
+            elseif v:IsA("SurfaceAppearance") then
+                applyToSurface(v)
+            end
+        end
+        if Config.Particles and isEmitter(v) then
+            applyToEmitter(v)
+        end
+        if Config.Sounds and v:IsA("Sound") then
+            applyToSound(v)
+        end
+    end)
+end
+
+local function hookNewInstances()
+    if descConn or not Running then return end
+    descConn = workspace.DescendantAdded:Connect(function(v)
+        task.defer(onInstanceAdded, v)
+    end)
+    table.insert(Conns, descConn)
+
+    lightConn = Lighting.ChildAdded:Connect(function(v)
+        task.defer(function()
+            if not Running or not v then return end
+            pcall(function()
+                if v:IsA("PostEffect") and Config.Particles then
+                    cachePostFx(v)
+                elseif v:IsA("Sky") and Config.Sky then
+                    cacheSky(v)
+                elseif v:IsA("Atmosphere") and Config.Sky then
+                    cacheAtmosphere(v)
+                end
+            end)
+        end)
+    end)
+    table.insert(Conns, lightConn)
+end
+
+-- =================================================================
+-- FITUR UTAMA (toggle ON/OFF)
+-- =================================================================
+local function applyTextures(on)
+    if on then
+        for _, v in pairs(workspace:GetDescendants()) do
+            pcall(function()
+                if v:IsA("BasePart") and not v:IsA("Terrain") then
+                    applyToPart(v)
+                elseif v:IsA("Decal") then
+                    applyToDecal(v)
+                elseif v:IsA("SurfaceAppearance") then
+                    applyToSurface(v)
+                end
+            end)
+        end
+        hookNewInstances()
+    else
+        for v, data in pairs(texCache) do
+            pcall(function()
+                if data.Material then
+                    v.Material = data.Material
+                    v.Reflectance = data.Reflectance
+                end
+                if data.TextureID ~= nil then v.TextureID = data.TextureID end
+                if data.Transparency ~= nil then v.Transparency = data.Transparency end
+                if data.Parent ~= nil then v.Parent = data.Parent end
+            end)
+        end
+        texCache = {}
+    end
+end
+
+local function applyParticles(on)
+    if on then
+        for _, v in pairs(workspace:GetDescendants()) do
+            pcall(function()
+                if isEmitter(v) then applyToEmitter(v) end
+            end)
+        end
+        hookNewInstances()
+    else
+        for v, state in pairs(particleCache) do
+            pcall(function() v.Enabled = state end)
+        end
+        particleCache = {}
+    end
+end
+
+local function applyLightingEffects(on)
+    if on then
+        for _, v in pairs(Lighting:GetChildren()) do
+            pcall(function()
+                if v:IsA("PostEffect") then cachePostFx(v) end
+            end)
+        end
+    else
+        restoreCache(postFxCache)
+        postFxCache = {}
+    end
+end
+
+local function applyShadows(on)
+    pcall(function()
+        if lightingPropCache == nil then
+            lightingPropCache = { GlobalShadows = Lighting.GlobalShadows }
+        end
+        if on then
+            Lighting.GlobalShadows = false
+        else
+            Lighting.GlobalShadows = lightingPropCache.GlobalShadows
+        end
+    end)
+end
+
+local function applyGrass(on)
+    if not Terrain then return end
+    pcall(function()
+        if terrainCache == nil then
+            terrainCache = { Decoration = Terrain.Decoration }
+        end
+        if on then
+            Terrain.Decoration = false
+        else
+            Terrain.Decoration = terrainCache.Decoration
+        end
+    end)
+end
+
+local function applyWater(on)
+    if not Terrain then return end
+    pcall(function()
+        if terrainCache == nil then terrainCache = {} end
+        if terrainCache.WaterWaveSize == nil then
+            terrainCache.WaterWaveSize     = Terrain.WaterWaveSize
+            terrainCache.WaterWaveSpeed    = Terrain.WaterWaveSpeed
+            terrainCache.WaterReflectance  = Terrain.WaterReflectance
+            terrainCache.WaterTransparency = Terrain.WaterTransparency
+        end
+        if on then
+            Terrain.WaterWaveSize     = 0
+            Terrain.WaterWaveSpeed    = 0
+            Terrain.WaterReflectance  = 0
+            Terrain.WaterTransparency = 1
+        else
+            Terrain.WaterWaveSize     = terrainCache.WaterWaveSize
+            Terrain.WaterWaveSpeed    = terrainCache.WaterWaveSpeed
+            Terrain.WaterReflectance  = terrainCache.WaterReflectance
+            Terrain.WaterTransparency = terrainCache.WaterTransparency
+        end
+    end)
+end
+
+local function applySky(on)
+    if on then
+        for _, v in pairs(Lighting:GetChildren()) do
+            pcall(function()
+                if v:IsA("Sky") then
+                    cacheSky(v)
+                elseif v:IsA("Atmosphere") then
+                    cacheAtmosphere(v)
+                end
+            end)
+        end
+        hookNewInstances()
+    else
+        restoreCache(skyCache)
+        skyCache = {}
+    end
+end
+
+local function applySounds(on)
+    if on then
+        for _, v in pairs(workspace:GetDescendants()) do
+            pcall(function()
+                if v:IsA("Sound") then applyToSound(v) end
+            end)
+        end
+        for _, v in pairs(SoundService:GetDescendants()) do
+            pcall(function()
+                if v:IsA("Sound") then applyToSound(v) end
+            end)
+        end
+        hookNewInstances()
+    else
+        for v, vol in pairs(soundCache) do
+            pcall(function() v.Volume = vol end)
+        end
+        soundCache = {}
+    end
+end
+
+local function applyLowGfx(on)
+    pcall(function()
+        if on then
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        else
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic
+        end
+    end)
+    pcall(function()
+        local ugs = UserSettings():GetService("UserGameSettings")
+        if on then
+            ugs.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
+        else
+            ugs.SavedQualityLevel = Enum.SavedQualitySetting.Automatic
+        end
+    end)
+end
+
+local function applyFullbright(on)
+    pcall(function()
+        if on then
+            Lighting.Brightness = 2.5
+            Lighting.ClockTime = 14
+            Lighting.OutdoorAmbient = Color3.fromRGB(140, 140, 140)
+        else
+            Lighting.Brightness = 2
+            Lighting.ClockTime = 12
+            Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+        end
+    end)
+end
+
+local function applyNoFog(on)
+    pcall(function()
+        if fogCache == nil then
+            fogCache = { FogEnd = Lighting.FogEnd, FogStart = Lighting.FogStart }
+        end
+        if on then
+            Lighting.FogEnd = 1e9
+            Lighting.FogStart = 0
+        else
+            Lighting.FogEnd = fogCache.FogEnd
+            Lighting.FogStart = fogCache.FogStart
+        end
+    end)
+end
+
+local function applyAntiAFK(on)
+    if on then
+        if not afkConn then
+            afkConn = LocalPlayer.Idled:Connect(function()
+                pcall(function()
+                    VirtualUser:CaptureController()
+                    VirtualUser:ClickButton2(Vector2.new())
+                end)
+            end)
+            table.insert(Conns, afkConn)
+        end
+    else
+        if afkConn then
+            pcall(function() afkConn:Disconnect() end)
+            afkConn = nil
+        end
+    end
+end
+
+-- =================================================================
+-- AKSI (FPS CAP, SERVER HOP, REJOIN, DLL)
+-- =================================================================
+local function setFpsCap(value)
+    CurrentFpsCap = value
+    local ok = pcall(function()
+        setfpscap(value)
+    end)
+    if ok then
+        notify("Batas FPS: " .. (value >= 9999 and "No Cap" or tostring(value)))
+    else
+        notify("setfpscap tidak didukung executor ini")
+    end
+end
+
+local function cleanMemory()
+    local removed = 0
+    for _, v in pairs(workspace:GetDescendants()) do
+        pcall(function()
+            if v:IsA("Message") or v:IsA("Hint") then
+                v:Destroy()
+                removed = removed + 1
+            end
+        end)
+    end
+    pcall(collectgarbage, "collect")
+    notify("Memori dibersihkan (" .. removed .. " sampah dihapus)")
+end
+
+local function rejoinServer()
+    notify("Rejoin server...")
+    task.spawn(function()
+        pcall(function()
+            task.wait(0.4)
+            TeleportService:Teleport(game.PlaceId, Players.LocalPlayer)
+        end)
+    end)
+end
+
+local function serverHop()
+    notify("Mencari server paling sepi...")
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local http = http_request or request or (http and http.request)
+            if not http then error("fitur HTTP tidak tersedia") end
+            local placeId  = game.PlaceId
+            local myJobId  = game.JobId
+            local bestId   = nil
+            local bestCount = math.huge
+            local cursor   = ""
+            for _ = 1, 4 do
+                local url = "https://games.roblox.com/v1/games/" .. tostring(placeId)
+                    .. "/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"
+                if cursor ~= "" then
+                    url = url .. "&cursor=" .. cursor
+                end
+                local res = http({ Url = url, Method = "GET" })
+                if not res or not res.Body then error("respons HTTP kosong") end
+                local data = HttpService:JSONDecode(res.Body)
+                for _, s in pairs(data.data or {}) do
+                    local count = s.playing or 0
+                    if s.id ~= myJobId and count >= 1 and count < bestCount then
+                        bestId = s.id
+                        bestCount = count
+                    end
+                end
+                cursor = data.nextPageCursor or ""
+                if bestId or cursor == "" then break end
+            end
+            if bestId then
+                notify("Ditemukan server (" .. bestCount .. " pemain). Melompat...")
+                task.wait(0.6)
+                TeleportService:Teleport(placeId, Players.LocalPlayer)
+            else
+                notify("Tidak ada server sepi yang ditemukan")
+            end
+        end)
+        if not ok then
+            notify("Server hop gagal: " .. tostring(err))
+        end
+    end)
+end
+
+local function unload()
+    if not Running then return end
+    Running = false
+    for _, c in pairs(Conns) do
+        pcall(function() c:Disconnect() end)
+    end
+    Conns = {}
+    if afkConn then
+        pcall(function() afkConn:Disconnect() end)
+        afkConn = nil
+    end
+    descConn = nil
+    lightConn = nil
+    pcall(function() gui:Destroy() end)
+    gui = nil
+    _G.DeltaAntiLagPro = nil
+    print("[Delta Anti-Lag] Script dimat
